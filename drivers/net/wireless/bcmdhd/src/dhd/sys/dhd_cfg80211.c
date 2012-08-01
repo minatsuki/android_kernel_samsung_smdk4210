@@ -1,7 +1,7 @@
 /*
  * Linux cfg80211 driver - Dongle Host Driver (DHD) related
  *
- * Copyright (C) 1999-2011, Broadcom Corporation
+ * Copyright (C) 1999-2012, Broadcom Corporation
  *
  *      Unless you and Broadcom execute a separate written software license
  * agreement governing use of this software, this software is licensed to you
@@ -46,6 +46,8 @@ extern void dhd_pktfilter_offload_enable(dhd_pub_t * dhd, char *arg, int enable,
 
 static int dhd_dongle_up = FALSE;
 
+static s32 wl_dongle_up(struct net_device *ndev, u32 up);
+
 /**
  * Function implementations
  */
@@ -68,6 +70,16 @@ s32 dhd_cfg80211_down(struct wl_priv *wl)
 	return 0;
 }
 
+static s32 wl_dongle_up(struct net_device *ndev, u32 up)
+{
+	s32 err = 0;
+
+	err = wldev_ioctl(ndev, WLC_UP, &up, sizeof(up), true);
+	if (unlikely(err)) {
+		WL_ERR(("WLC_UP error (%d)\n", err));
+	}
+	return err;
+}
 s32 dhd_config_dongle(struct wl_priv *wl, bool need_lock)
 {
 #ifndef DHD_SDALIGN
@@ -87,6 +99,11 @@ s32 dhd_config_dongle(struct wl_priv *wl, bool need_lock)
 	if (need_lock)
 		rtnl_lock();
 
+	err = wl_dongle_up(ndev, 0);
+	if (unlikely(err)) {
+		WL_ERR(("wl_dongle_up failed\n"));
+		goto default_conf_out;
+	}
 	dhd_dongle_up = true;
 
 default_conf_out:
@@ -463,7 +480,7 @@ void wl_cfg80211_btcoex_deinit(struct wl_priv *wl)
 	kfree(wl->btcoex_info);
 	wl->btcoex_info = NULL;
 }
-#endif
+#endif /* COEX_DHCP */
 
 int wl_cfg80211_set_btcoex_dhcp(struct net_device *dev, char *command)
 {
@@ -490,23 +507,36 @@ int wl_cfg80211_set_btcoex_dhcp(struct net_device *dev, char *command)
 	int i;
 #endif
 
+#ifdef PASS_ALL_MCAST_PKTS
+		char iovbuf[20];
+		uint32 allmultivar = 0;
+#endif
+
 	/* Figure out powermode 1 or o command */
 	strncpy((char *)&powermode_val, command + strlen("BTCOEXMODE") +1, 1);
+	WL_ERR(("%s: DHCP session Enter\n", __FUNCTION__));
 
 	if (strnicmp((char *)&powermode_val, "1", strlen("1")) == 0) {
 
-		WL_TRACE(("%s: DHCP session starts\n", __FUNCTION__));
+		WL_ERR(("%s: DHCP session starts\n", __FUNCTION__));
 
 #ifdef PKT_FILTER_SUPPORT
 		dhd->dhcp_in_progress = 1;
 
 		/* Disable packet filtering */
 		if (dhd_pkt_filter_enable && dhd->early_suspended) {
-			WL_TRACE(("DHCP in progressing , disable packet filter!!!\n"));
+			WL_ERR(("DHCP in progressing , disable packet filter!!!\n"));
 			for (i = 0; i < dhd->pktfilter_count; i++) {
 				dhd_pktfilter_offload_enable(dhd, dhd->pktfilter[i],
 					0, dhd_master_mode);
 			}
+			
+#ifdef PASS_ALL_MCAST_PKTS
+						allmultivar = 1;
+						bcm_mkiovar("allmulti", (char *)&allmultivar, 4, iovbuf, sizeof(iovbuf));
+						dhd_wl_ioctl_cmd(dhd, WLC_SET_VAR, iovbuf, sizeof(iovbuf), TRUE, 0);
+						WL_ERR(("DHCP is progressing , allmulti value = %d \n", allmultivar));
+#endif /* PASS_ALL_MCAST_PKTS */
 		}
 #endif
 
@@ -555,14 +585,22 @@ int wl_cfg80211_set_btcoex_dhcp(struct net_device *dev, char *command)
 
 #ifdef PKT_FILTER_SUPPORT
         dhd->dhcp_in_progress = 0;
+	WL_ERR(("%s: DHCP is complete \n", __FUNCTION__));
 
 		/* Enable packet filtering */
 		if (dhd_pkt_filter_enable && dhd->early_suspended) {
-			WL_TRACE(("DHCP is complete , enable packet filter!!!\n"));
+			WL_ERR(("DHCP is complete , enable packet filter!!!\n"));
 			for (i = 0; i < dhd->pktfilter_count; i++) {
 				dhd_pktfilter_offload_enable(dhd, dhd->pktfilter[i],
 					1, dhd_master_mode);
 			}
+
+#ifdef PASS_ALL_MCAST_PKTS
+			allmultivar = 0;
+			bcm_mkiovar("allmulti", (char *)&allmultivar, 4, iovbuf, sizeof(iovbuf));
+			dhd_wl_ioctl_cmd(dhd, WLC_SET_VAR, iovbuf, sizeof(iovbuf), TRUE, 0);
+			WL_ERR(("DHCP is complete , allmulti value = %d \n", allmultivar));
+#endif /* PASS_ALL_MCAST_PKTS */
 		}
 #endif
 
